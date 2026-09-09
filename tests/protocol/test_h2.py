@@ -9,7 +9,8 @@ from h2.events import ConnectionTerminated
 
 from hypercorn.asyncio.worker_context import EventWrapper, WorkerContext
 from hypercorn.config import Config
-from hypercorn.events import Closed, RawData
+from hypercorn.events import Closed, RawData, Updated
+from hypercorn.protocol.events import StreamClosed
 from hypercorn.protocol.h2 import BUFFER_HIGH_WATER, BufferCompleteError, H2Protocol, StreamBuffer
 from hypercorn.typing import ConnectionState
 
@@ -116,3 +117,50 @@ async def test_protocol_keep_alive_max_requests() -> None:
     protocol.send.assert_awaited()  # type: ignore
     events = client.receive_data(protocol.send.call_args_list[1].args[0].data)  # type: ignore
     assert isinstance(events[-1], ConnectionTerminated)
+
+
+async def _terminated_protocol_with_streams(*stream_ids: int) -> tuple[H2Protocol, H2Connection]:
+    protocol = H2Protocol(
+        Mock(),
+        Config(),
+        WorkerContext(None),
+        AsyncMock(),
+        ConnectionState({}),
+        False,
+        None,
+        None,
+        AsyncMock(),
+    )
+    client = H2Connection()
+    client.initiate_connection()
+    headers = [
+        (":method", "POST"),
+        (":path", "/"),
+        (":authority", "hypercorn"),
+        (":scheme", "https"),
+    ]
+    for stream_id in stream_ids:
+        client.send_headers(stream_id, headers)
+    await protocol.handle(RawData(data=client.data_to_send()))
+    await protocol.context.terminated.set()
+    protocol.send.reset_mock()  # type: ignore
+    return protocol, client
+
+
+@pytest.mark.asyncio
+async def test_protocol_terminated_last_stream_closed() -> None:
+    protocol, client = await _terminated_protocol_with_streams(1)
+    await protocol.stream_send(StreamClosed(stream_id=1))
+    # GOAWAY is sent and then the connection is closed, rather than
+    # restarting the idle task on a connection that is being torn down.
+    assert len(protocol.send.call_args_list) == 2  # type: ignore
+    events = client.receive_data(protocol.send.call_args_list[0].args[0].data)  # type: ignore
+    assert isinstance(events[-1], ConnectionTerminated)
+    assert protocol.send.call_args_list[1] == call(Closed())  # type: ignore
+
+
+@pytest.mark.asyncio
+async def test_protocol_terminated_stream_closed_with_active_streams() -> None:
+    protocol, client = await _terminated_protocol_with_streams(1, 3)
+    await protocol.stream_send(StreamClosed(stream_id=1))
+    assert protocol.send.call_args_list == [call(Updated(idle=False))]  # type: ignore

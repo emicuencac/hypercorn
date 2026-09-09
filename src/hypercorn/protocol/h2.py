@@ -228,6 +228,8 @@ class H2Protocol:
                 if idle and self.context.terminated.is_set():
                     self.connection.close_connection()
                     await self._flush()
+                    await self.send(Closed())
+                    return
                 await self.send(Updated(idle=idle))
             elif isinstance(event, Request):
                 await self._create_server_push(event.stream_id, event.raw_path, event.headers)
