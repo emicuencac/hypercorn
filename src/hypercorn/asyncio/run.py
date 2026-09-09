@@ -163,7 +163,6 @@ async def worker_serve(
 
         for server in servers:
             server.close()
-            await server.wait_closed()
 
         try:
             gathered_server_tasks = asyncio.gather(*server_tasks)
