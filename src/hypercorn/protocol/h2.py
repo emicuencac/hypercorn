@@ -258,9 +258,12 @@ class H2Protocol:
                 if self.keep_alive_requests > self.config.keep_alive_max_requests:
                     self.connection.close_connection()
             elif isinstance(event, h2.events.DataReceived):
-                await self.streams[event.stream_id].handle(
-                    Body(stream_id=event.stream_id, data=event.data)
-                )
+                stream = self.streams.get(event.stream_id)
+                if stream is not None:
+                    # The stream is gone when the request was refused
+                    # as it arrived (terminated) or the response was
+                    # sent before the full request was received.
+                    await stream.handle(Body(stream_id=event.stream_id, data=event.data))
                 self.connection.acknowledge_received_data(
                     event.flow_controlled_length, event.stream_id
                 )

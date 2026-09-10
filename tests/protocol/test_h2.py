@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, call, Mock
 
 import pytest
 from h2.connection import H2Connection
-from h2.events import ConnectionTerminated
+from h2.events import ConnectionTerminated, StreamReset
 
 from hypercorn.asyncio.worker_context import EventWrapper, WorkerContext
 from hypercorn.config import Config
@@ -164,3 +164,23 @@ async def test_protocol_terminated_stream_closed_with_active_streams() -> None:
     protocol, client = await _terminated_protocol_with_streams(1, 3)
     await protocol.stream_send(StreamClosed(stream_id=1))
     assert protocol.send.call_args_list == [call(Updated(idle=False))]  # type: ignore
+
+
+@pytest.mark.asyncio
+async def test_protocol_terminated_data_for_refused_stream() -> None:
+    protocol, client = await _terminated_protocol_with_streams(1)
+    # The client sent HEADERS and DATA back to back, before it could see the
+    # RST_STREAM that a terminated worker answers new requests with. Both
+    # frames arrive in one read, so the DataReceived event refers to a stream
+    # that was refused and never entered protocol.streams.
+    client.send_headers(
+        3,
+        [(":method", "POST"), (":path", "/"), (":authority", "hypercorn"), (":scheme", "https")],
+    )
+    client.send_data(3, b"body")
+    await protocol.handle(RawData(data=client.data_to_send()))
+    events = client.receive_data(protocol.send.call_args_list[0].args[0].data)  # type: ignore
+    assert isinstance(events[0], StreamReset)
+    assert events[0].stream_id == 3
+    # The pre-existing stream is unaffected
+    assert 1 in protocol.streams
