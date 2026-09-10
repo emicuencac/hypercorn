@@ -184,3 +184,33 @@ async def test_protocol_terminated_data_for_refused_stream() -> None:
     assert events[0].stream_id == 3
     # The pre-existing stream is unaffected
     assert 1 in protocol.streams
+
+
+@pytest.mark.asyncio
+async def test_send_data_cleanup_without_stream_buffer() -> None:
+    protocol, _ = await _terminated_protocol_with_streams(1)
+    del protocol.stream_buffers[1]
+
+    await protocol._send_data(1)
+
+    assert 1 not in protocol.stream_buffers
+
+
+@pytest.mark.asyncio
+async def test_send_data_cleanup_without_priority_stream() -> None:
+    protocol = H2Protocol(
+        Mock(),
+        Config(),
+        WorkerContext(None),
+        AsyncMock(),
+        ConnectionState({}),
+        False,
+        None,
+        None,
+        AsyncMock(),
+    )
+    protocol.stream_buffers[1] = StreamBuffer(EventWrapper)
+
+    await protocol._send_data(1)
+
+    assert 1 not in protocol.stream_buffers
