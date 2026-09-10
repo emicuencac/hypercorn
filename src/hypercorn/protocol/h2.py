@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 import h2
 import h2.connection
@@ -175,9 +176,11 @@ class H2Protocol:
         except (h2.exceptions.StreamClosedError, KeyError, h2.exceptions.ProtocolError):
             # Stream or connection has closed whilst waiting to send
             # data, not a problem - just force close it.
-            await self.stream_buffers[stream_id].close()
-            del self.stream_buffers[stream_id]
-            self.priority.remove_stream(stream_id)
+            buffer = self.stream_buffers.pop(stream_id, None)
+            if buffer is not None:
+                await buffer.close()
+            with suppress(priority.MissingStreamError):
+                self.priority.remove_stream(stream_id)
 
     async def handle(self, event: Event) -> None:
         if isinstance(event, RawData):
@@ -228,6 +231,8 @@ class H2Protocol:
                 if idle and self.context.terminated.is_set():
                     self.connection.close_connection()
                     await self._flush()
+                    await self.send(Closed())
+                    return
                 await self.send(Updated(idle=idle))
             elif isinstance(event, Request):
                 await self._create_server_push(event.stream_id, event.raw_path, event.headers)
@@ -256,9 +261,12 @@ class H2Protocol:
                 if self.keep_alive_requests > self.config.keep_alive_max_requests:
                     self.connection.close_connection()
             elif isinstance(event, h2.events.DataReceived):
-                await self.streams[event.stream_id].handle(
-                    Body(stream_id=event.stream_id, data=event.data)
-                )
+                stream = self.streams.get(event.stream_id)
+                if stream is not None:
+                    # The stream is gone when the request was refused
+                    # as it arrived (terminated) or the response was
+                    # sent before the full request was received.
+                    await stream.handle(Body(stream_id=event.stream_id, data=event.data))
                 self.connection.acknowledge_received_data(
                     event.flow_controlled_length, event.stream_id
                 )

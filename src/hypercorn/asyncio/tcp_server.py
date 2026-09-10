@@ -82,7 +82,7 @@ class TCPServer:
                 try:
                     self.writer.write(event.data)
                     await self.writer.drain()
-                except (ConnectionError, RuntimeError):
+                except (OSError, RuntimeError):
                     await self.protocol.handle(Closed())
         elif isinstance(event, Closed):
             await self._close()
@@ -118,13 +118,7 @@ class TCPServer:
         try:
             self.writer.close()
             await self.writer.wait_closed()
-        except (
-            BrokenPipeError,
-            ConnectionAbortedError,
-            ConnectionResetError,
-            RuntimeError,
-            asyncio.CancelledError,
-        ):
+        except (OSError, RuntimeError, asyncio.CancelledError):
             pass  # Already closed
         finally:
             await self.idle_task.stop()

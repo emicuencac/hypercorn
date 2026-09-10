@@ -5,11 +5,12 @@ from unittest.mock import AsyncMock, call, Mock
 
 import pytest
 from h2.connection import H2Connection
-from h2.events import ConnectionTerminated
+from h2.events import ConnectionTerminated, StreamReset
 
 from hypercorn.asyncio.worker_context import EventWrapper, WorkerContext
 from hypercorn.config import Config
-from hypercorn.events import Closed, RawData
+from hypercorn.events import Closed, RawData, Updated
+from hypercorn.protocol.events import StreamClosed
 from hypercorn.protocol.h2 import BUFFER_HIGH_WATER, BufferCompleteError, H2Protocol, StreamBuffer
 from hypercorn.typing import ConnectionState
 
@@ -116,3 +117,100 @@ async def test_protocol_keep_alive_max_requests() -> None:
     protocol.send.assert_awaited()  # type: ignore
     events = client.receive_data(protocol.send.call_args_list[1].args[0].data)  # type: ignore
     assert isinstance(events[-1], ConnectionTerminated)
+
+
+async def _terminated_protocol_with_streams(*stream_ids: int) -> tuple[H2Protocol, H2Connection]:
+    protocol = H2Protocol(
+        Mock(),
+        Config(),
+        WorkerContext(None),
+        AsyncMock(),
+        ConnectionState({}),
+        False,
+        None,
+        None,
+        AsyncMock(),
+    )
+    client = H2Connection()
+    client.initiate_connection()
+    headers = [
+        (":method", "POST"),
+        (":path", "/"),
+        (":authority", "hypercorn"),
+        (":scheme", "https"),
+    ]
+    for stream_id in stream_ids:
+        client.send_headers(stream_id, headers)
+    await protocol.handle(RawData(data=client.data_to_send()))
+    await protocol.context.terminated.set()
+    protocol.send.reset_mock()  # type: ignore
+    return protocol, client
+
+
+@pytest.mark.asyncio
+async def test_protocol_terminated_last_stream_closed() -> None:
+    protocol, client = await _terminated_protocol_with_streams(1)
+    await protocol.stream_send(StreamClosed(stream_id=1))
+    # GOAWAY is sent and then the connection is closed, rather than
+    # restarting the idle task on a connection that is being torn down.
+    assert len(protocol.send.call_args_list) == 2  # type: ignore
+    events = client.receive_data(protocol.send.call_args_list[0].args[0].data)  # type: ignore
+    assert isinstance(events[-1], ConnectionTerminated)
+    assert protocol.send.call_args_list[1] == call(Closed())  # type: ignore
+
+
+@pytest.mark.asyncio
+async def test_protocol_terminated_stream_closed_with_active_streams() -> None:
+    protocol, client = await _terminated_protocol_with_streams(1, 3)
+    await protocol.stream_send(StreamClosed(stream_id=1))
+    assert protocol.send.call_args_list == [call(Updated(idle=False))]  # type: ignore
+
+
+@pytest.mark.asyncio
+async def test_protocol_terminated_data_for_refused_stream() -> None:
+    protocol, client = await _terminated_protocol_with_streams(1)
+    # The client sent HEADERS and DATA back to back, before it could see the
+    # RST_STREAM that a terminated worker answers new requests with. Both
+    # frames arrive in one read, so the DataReceived event refers to a stream
+    # that was refused and never entered protocol.streams.
+    client.send_headers(
+        3,
+        [(":method", "POST"), (":path", "/"), (":authority", "hypercorn"), (":scheme", "https")],
+    )
+    client.send_data(3, b"body")
+    await protocol.handle(RawData(data=client.data_to_send()))
+    events = client.receive_data(protocol.send.call_args_list[0].args[0].data)  # type: ignore
+    assert isinstance(events[0], StreamReset)
+    assert events[0].stream_id == 3
+    # The pre-existing stream is unaffected
+    assert 1 in protocol.streams
+
+
+@pytest.mark.asyncio
+async def test_send_data_cleanup_without_stream_buffer() -> None:
+    protocol, _ = await _terminated_protocol_with_streams(1)
+    del protocol.stream_buffers[1]
+
+    await protocol._send_data(1)
+
+    assert 1 not in protocol.stream_buffers
+
+
+@pytest.mark.asyncio
+async def test_send_data_cleanup_without_priority_stream() -> None:
+    protocol = H2Protocol(
+        Mock(),
+        Config(),
+        WorkerContext(None),
+        AsyncMock(),
+        ConnectionState({}),
+        False,
+        None,
+        None,
+        AsyncMock(),
+    )
+    protocol.stream_buffers[1] = StreamBuffer(EventWrapper)
+
+    await protocol._send_data(1)
+
+    assert 1 not in protocol.stream_buffers

@@ -163,18 +163,17 @@ async def worker_serve(
 
         for server in servers:
             server.close()
-            await server.wait_closed()
 
         try:
-            gathered_server_tasks = asyncio.gather(*server_tasks)
-            await asyncio.wait_for(gathered_server_tasks, config.graceful_timeout)
-        except asyncio.TimeoutError:
-            pass
+            if server_tasks:
+                _, pending = await asyncio.wait(server_tasks, timeout=config.graceful_timeout)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    # Bounded, so an app that swallows CancelledError
+                    # cannot keep the worker alive.
+                    await asyncio.wait(pending, timeout=config.graceful_timeout)
         finally:
-            # Retrieve the Gathered Tasks Cancelled Exception, to
-            # prevent a warning that this hasn't been done.
-            gathered_server_tasks.exception()
-
             await lifespan.wait_for_shutdown()
             lifespan_task.cancel()
             await lifespan_task
