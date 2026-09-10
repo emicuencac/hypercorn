@@ -15,10 +15,7 @@ class AsyncioSingleTask:
         async with self._lock:
             if self._handle is not None:
                 self._handle.cancel()
-                try:
-                    await self._handle
-                except asyncio.CancelledError:
-                    pass
+                await asyncio.wait({self._handle})
 
             self._handle = task_group._task_group.create_task(action())  # type: ignore
 
@@ -26,10 +23,7 @@ class AsyncioSingleTask:
         async with self._lock:
             if self._handle is not None:
                 self._handle.cancel()
-                try:
-                    await self._handle
-                except asyncio.CancelledError:
-                    pass
+                await asyncio.wait({self._handle})
 
             self._handle = None
 

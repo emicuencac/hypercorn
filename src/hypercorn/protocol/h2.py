@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 import h2
 import h2.connection
@@ -175,9 +176,11 @@ class H2Protocol:
         except (h2.exceptions.StreamClosedError, KeyError, h2.exceptions.ProtocolError):
             # Stream or connection has closed whilst waiting to send
             # data, not a problem - just force close it.
-            await self.stream_buffers[stream_id].close()
-            del self.stream_buffers[stream_id]
-            self.priority.remove_stream(stream_id)
+            buffer = self.stream_buffers.pop(stream_id, None)
+            if buffer is not None:
+                await buffer.close()
+            with suppress(priority.MissingStreamError):
+                self.priority.remove_stream(stream_id)
 
     async def handle(self, event: Event) -> None:
         if isinstance(event, RawData):
