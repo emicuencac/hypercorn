@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -8,8 +9,48 @@ from hypercorn.app_wrappers import ASGIWrapper
 from hypercorn.asyncio.tcp_server import TCPServer
 from hypercorn.asyncio.worker_context import WorkerContext
 from hypercorn.config import Config
+from hypercorn.events import Closed, RawData
 from .helpers import MemoryReader, MemoryWriter
 from ..helpers import echo_framework
+
+
+class OSErrorOnDrainWriter(MemoryWriter):
+    async def drain(self) -> None:
+        raise OSError("connection_lost carried a non ConnectionError")
+
+
+class OSErrorOnWaitClosedWriter(MemoryWriter):
+    async def wait_closed(self) -> None:
+        raise OSError("SSL shutdown timed out")
+
+
+def _server(writer: MemoryWriter) -> TCPServer:
+    return TCPServer(
+        ASGIWrapper(echo_framework),
+        asyncio.get_running_loop(),
+        Config(),
+        WorkerContext(None),
+        {},
+        MemoryReader(),  # type: ignore
+        writer,  # type: ignore
+    )
+
+
+@pytest.mark.asyncio
+async def test_protocol_send_closes_on_oserror() -> None:
+    server = _server(OSErrorOnDrainWriter())
+    server.protocol = AsyncMock()
+
+    await server.protocol_send(RawData(data=b"data"))
+
+    server.protocol.handle.assert_awaited_once_with(Closed())
+
+
+@pytest.mark.asyncio
+async def test_close_ignores_oserror() -> None:
+    server = _server(OSErrorOnWaitClosedWriter())
+
+    await server._close()
 
 
 @pytest.mark.asyncio
